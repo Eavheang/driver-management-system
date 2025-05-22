@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -60,6 +60,7 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
   const [selectedShift, setSelectedShift] = useState<string | null>(null)
   const { toast } = useToast()
   const router = useRouter()
+  const [driverShifts, setDriverShifts] = useState<Array<{ shift_id: string }>>([])
 
   const handleClose = () => {
     setIsOpen(false)
@@ -140,40 +141,34 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
     }
   }
 
-  // Handle assigning replacement and creating OT record
-  const handleAssignReplacement = async (scheduleId: string, replacementDriverId: string, driverId: string) => {
+  // Add function to fetch driver shifts
+  const fetchDriverShifts = async (driverId: string) => {
+    const supabase = getSupabaseClient()
+    const { data } = await supabase
+      .from("driver_shifts")
+      .select("shift_id")
+      .eq("driver_id", driverId)
+    
+    setDriverShifts(data || [])
+  }
+
+  // Handle assigning replacement
+  const handleAssignReplacement = async (scheduleId: string, replacementDriverId: string, driverId: string, shiftId: string) => {
     setLoading(true)
     const supabase = getSupabaseClient()
     const dateStr = date.toISOString().split("T")[0]
 
     try {
-      // Get all shifts of the original driver
-      const { data: driverShifts, error: shiftsError } = await supabase
-        .from("driver_shifts")
-        .select("shift_id")
-        .eq("driver_id", driverId)
-
-      if (shiftsError || !driverShifts) {
-        throw new Error("Could not find shifts for driver")
-      }
-
-      // Create replacement records for each shift
-      const replacementPromises = driverShifts.map(async (driverShift) => {
-        // Create replacement record
-        const { data: replacement } = await supabase
-          .from("replacements")
-          .insert({
-            schedule_id: scheduleId,
-            replacement_driver_id: replacementDriverId,
-            shift_id: driverShift.shift_id,
-          })
-          .select()
-          .single()
-
-        return replacement
-      })
-
-      await Promise.all(replacementPromises)
+      // Create replacement record for the specific shift
+      const { data: replacement } = await supabase
+        .from("replacements")
+        .insert({
+          schedule_id: scheduleId,
+          replacement_driver_id: replacementDriverId,
+          shift_id: shiftId,
+        })
+        .select()
+        .single()
 
       // Check if driver already has an OT record for this date
       const { data: existingOT } = await supabase
@@ -183,32 +178,29 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
         .eq("date", dateStr)
         .maybeSingle()
 
-      // Calculate total OT hours based on number of shifts
-      const otHours = driverShifts.length * 8
-
       if (existingOT) {
-        // If driver already has OT record, add additional hours for multiple shifts
+        // If driver already has OT record, add additional hours for this shift
         await supabase
           .from("overtime_records")
           .update({
-            hours: existingOT.hours + otHours,
+            hours: existingOT.hours + 8,
             updated_at: new Date().toISOString(),
           })
           .eq("id", existingOT.id)
       } else {
-        // Create new OT record with hours for all shifts
+        // Create new OT record for this shift
         await supabase.from("overtime_records").insert({
           driver_id: replacementDriverId,
           date: dateStr,
-          hours: otHours,
+          hours: 8,
           ot_type: "replacement",
           ot_rate: 1.5,
         })
       }
 
       toast({
-        title: "Replacements assigned",
-        description: `Replacement driver has been assigned to ${driverShifts.length} shift${driverShifts.length > 1 ? 's' : ''} and OT record created.`,
+        title: "Replacement assigned",
+        description: "Replacement driver has been assigned for the shift.",
       })
 
       router.refresh()
@@ -231,58 +223,31 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
     const dateStr = date.toISOString().split("T")[0]
 
     try {
-      // Get all shifts of the original driver
-      const { data: driverShifts, error: shiftsError } = await supabase
-        .from("driver_shifts")
-        .select("shift_id")
-        .eq("driver_id", driverId)
-
-      if (shiftsError || !driverShifts) {
-        throw new Error("Could not find shifts for driver")
-      }
-
-      // Get all current replacements for this schedule
-      const { data: oldReplacements } = await supabase
+      // Get the current replacement to get the shift_id
+      const { data: oldReplacement } = await supabase
         .from("replacements")
-        .select("id, replacement_driver_id")
-        .eq("schedule_id", scheduleId)
+        .select("replacement_driver_id, shift_id")
+        .eq("id", replacementId)
+        .single()
 
-      if (!oldReplacements) throw new Error("Could not find current replacements")
+      if (!oldReplacement) throw new Error("Could not find current replacement")
 
-      // Delete all existing replacements
+      // Update the replacement record
       await supabase
         .from("replacements")
+        .update({
+          replacement_driver_id: newDriverId,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", replacementId)
+
+      // Remove OT record for old driver
+      await supabase
+        .from("overtime_records")
         .delete()
-        .in("id", oldReplacements.map(r => r.id))
-
-      // Create new replacement records for each shift
-      const replacementPromises = driverShifts.map(async (driverShift) => {
-        return supabase
-          .from("replacements")
-          .insert({
-            schedule_id: scheduleId,
-            replacement_driver_id: newDriverId,
-            shift_id: driverShift.shift_id,
-          })
-          .select()
-          .single()
-      })
-
-      await Promise.all(replacementPromises)
-
-      // Remove OT records for old drivers
-      const oldDriverIds = [...new Set(oldReplacements.map(r => r.replacement_driver_id))]
-      for (const oldDriverId of oldDriverIds) {
-        await supabase
-          .from("overtime_records")
-          .delete()
-          .eq("driver_id", oldDriverId)
-          .eq("date", dateStr)
-          .eq("ot_type", "replacement")
-      }
-
-      // Calculate total OT hours based on number of shifts
-      const otHours = driverShifts.length * 8
+        .eq("driver_id", oldReplacement.replacement_driver_id)
+        .eq("date", dateStr)
+        .eq("ot_type", "replacement")
 
       // Check if new driver already has an OT record for this date
       const { data: existingOT } = await supabase
@@ -293,28 +258,28 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
         .maybeSingle()
 
       if (existingOT) {
-        // If driver already has OT record, add additional hours for multiple shifts
+        // If driver already has OT record, add additional hours for this shift
         await supabase
           .from("overtime_records")
           .update({
-            hours: existingOT.hours + otHours,
+            hours: existingOT.hours + 8,
             updated_at: new Date().toISOString(),
           })
           .eq("id", existingOT.id)
       } else {
-        // Create new OT record with hours for all shifts
+        // Create new OT record for this shift
         await supabase.from("overtime_records").insert({
           driver_id: newDriverId,
           date: dateStr,
-          hours: otHours,
+          hours: 8,
           ot_type: "replacement",
           ot_rate: 1.5,
         })
       }
 
       toast({
-        title: "Replacements updated",
-        description: `Replacement driver has been updated for ${driverShifts.length} shift${driverShifts.length > 1 ? 's' : ''}.`,
+        title: "Replacement updated",
+        description: "Replacement driver has been updated successfully.",
       })
 
       router.refresh()
@@ -347,6 +312,23 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
   const needsReplacement = (schedule: Schedule) => {
     return (schedule.is_day_off || schedule.is_annual_leave) && schedule.replacements.length === 0
   }
+
+  // Add effect to fetch driver shifts
+  useEffect(() => {
+    const fetchShiftsForDrivers = async () => {
+      // Get all drivers that are on leave or day off
+      const driversOnLeave = schedules
+        .filter(s => s.is_day_off || s.is_annual_leave)
+        .map(s => s.driver_id)
+
+      // Fetch shifts for each driver
+      for (const driverId of driversOnLeave) {
+        await fetchDriverShifts(driverId)
+      }
+    }
+
+    fetchShiftsForDrivers()
+  }, [schedules])
 
   return (
     <Dialog open={isOpen} onOpenChange={setIsOpen}>
@@ -404,49 +386,78 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
 
                       {(schedule.is_day_off || schedule.is_annual_leave) && (
                         <div className="rounded-lg border p-4">
-                          <h5 className="font-medium mb-2">Assign Replacement</h5>
-                          <div className="grid gap-4">
-                            <div>
-                              <Label>Select Replacement Driver</Label>
-                              <Select
-                                onValueChange={(value) => {
-                                  if (value) {
-                                    if (schedule.replacements.length > 0) {
-                                      handleUpdateReplacement(schedule.replacements[0].id, value, schedule.driver_id, schedule.id)
-                                    } else {
-                                      handleAssignReplacement(schedule.id, value, schedule.driver_id)
-                                    }
-                                  }
-                                }}
-                                value={schedule.replacements[0]?.replacement_driver_id || ""}
-                                disabled={loading}
-                              >
-                                <SelectTrigger>
-                                  <SelectValue placeholder="Select replacement driver" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {getAvailableDrivers()
-                                    .filter(d => d.id !== driver.id)
-                                    .map(d => (
-                                      <SelectItem key={d.id} value={d.id}>
-                                        {d.name} ({d.staff_id})
-                                      </SelectItem>
-                                    ))
-                                  }
-                                </SelectContent>
-                              </Select>
-                            </div>
+                          <h5 className="font-medium mb-2">Assign Replacements</h5>
+                          <div className="space-y-4">
+                            {shifts.filter(shift => 
+                              schedule.replacements.some(r => r.shift_id === shift.id) || // Show shifts that already have replacements
+                              driverShifts.some(ds => ds.shift_id === shift.id) // Show shifts assigned to the driver
+                            ).map(shift => {
+                              const replacement = schedule.replacements.find(r => r.shift_id === shift.id)
+                              return (
+                                <div key={shift.id} className="space-y-2">
+                                  <div className="flex items-center justify-between">
+                                    <Label className="font-medium">
+                                      {shift.name}
+                                      <span className="ml-2 font-normal text-sm text-muted-foreground">
+                                        ({shift.start_time.substring(0, 5)} - {shift.end_time.substring(0, 5)})
+                                      </span>
+                                    </Label>
+                                  </div>
+                                  <Select
+                                    onValueChange={(value) => {
+                                      if (value) {
+                                        if (replacement) {
+                                          handleUpdateReplacement(replacement.id, value, schedule.driver_id, schedule.id)
+                                        } else {
+                                          handleAssignReplacement(schedule.id, value, schedule.driver_id, shift.id)
+                                        }
+                                      }
+                                    }}
+                                    value={replacement?.replacement_driver_id || ""}
+                                    disabled={loading}
+                                  >
+                                    <SelectTrigger>
+                                      <SelectValue placeholder={`Select replacement driver for ${shift.name}`} />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {getAvailableDrivers()
+                                        .filter(d => d.id !== driver.id)
+                                        .map(d => (
+                                          <SelectItem key={d.id} value={d.id}>
+                                            {d.name} ({d.staff_id})
+                                          </SelectItem>
+                                        ))
+                                      }
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                              )
+                            })}
                           </div>
-                          {schedule.replacements.map(replacement => {
-                            const replacementDriver = drivers.find(d => d.id === replacement.replacement_driver_id)
-                            const replacementShift = shifts.find(s => s.id === replacement.shift_id)
-                            return (
-                              <div key={replacement.id} className="mt-2 text-sm text-muted-foreground">
-                                Replaced by: {replacementDriver?.name} ({replacementDriver?.staff_id})
-                                {replacementShift && ` - ${replacementShift.name}`}
-                              </div>
-                            )
-                          })}
+                          {schedule.replacements.length > 0 && (
+                            <div className="mt-4 space-y-3">
+                              <h6 className="text-sm font-medium text-muted-foreground">Current Replacements:</h6>
+                              {schedule.replacements.map(replacement => {
+                                const replacementDriver = drivers.find(d => d.id === replacement.replacement_driver_id)
+                                const replacementShift = shifts.find(s => s.id === replacement.shift_id)
+                                return (
+                                  <div key={replacement.id} className="flex items-center justify-between p-2 rounded-md bg-muted/50">
+                                    <div>
+                                      <div className="font-medium">{replacementDriver?.name}</div>
+                                      <div className="text-sm text-muted-foreground">
+                                        {replacementDriver?.staff_id} - {replacementShift?.name}
+                                        {replacementShift?.start_time && replacementShift?.end_time && (
+                                          <span className="ml-1">
+                                            ({replacementShift.start_time.substring(0, 5)} - {replacementShift.end_time.substring(0, 5)})
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>

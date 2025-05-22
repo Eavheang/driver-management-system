@@ -3,10 +3,13 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { Button } from "@/components/ui/button"
-import { Calendar, Users, Clock, FileSpreadsheet, Home } from "lucide-react"
+import { Calendar, Users, Clock, FileSpreadsheet, Home, LogOut } from "lucide-react"
+import { useAuth } from "@/lib/auth/auth-context"
+import { cn } from "@/lib/utils"
 
 export function MainNav() {
   const pathname = usePathname()
+  const { logout, isAuthenticated } = useAuth()
 
   const routes = [
     {
@@ -67,6 +70,17 @@ export function MainNav() {
               </Button>
             ))}
           </div>
+          {isAuthenticated && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={logout}
+              className="ml-4"
+            >
+              <LogOut className="h-4 w-4 mr-2" />
+              Logout
+            </Button>
+          )}
         </nav>
       </div>
     </header>
