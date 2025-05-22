@@ -56,6 +56,8 @@ interface ProcessedDriver {
   driverName: string
   isReplaced: boolean
   replacementDriver?: Driver
+  dayOff?: string
+  contact?: string
 }
 
 interface ProcessedShift {
@@ -80,23 +82,24 @@ export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProp
   }
 
   const fetchDailySchedule = async () => {
-    if (!date) return
+    if (!date) return;
 
-    setIsLoading(true)
-    const supabase = getSupabaseClient()
-    const dateStr = date.toISOString().split("T")[0]
+    setIsLoading(true);
+    const supabase = getSupabaseClient();
+    const dateStr = date.toISOString().split("T")[0];
 
     try {
-      // First, fetch all shifts
-      const { data: allShifts } = await supabase
+      // First, fetch all shifts with proper error handling
+      const { data: allShifts, error: shiftsError } = await supabase
         .from("shifts")
         .select("*")
-        .order("start_time")
+        .order("start_time");
 
-      if (!allShifts) throw new Error("Could not fetch shifts")
+      if (shiftsError) throw new Error(`Could not fetch shifts: ${shiftsError.message}`);
+      if (!allShifts) throw new Error("No shifts data returned");
 
-      // Then fetch driver assignments and schedules
-      const { data: driverShifts } = await supabase
+      // Then fetch driver assignments with proper error handling
+      const { data: driverShifts, error: driverShiftsError } = await supabase
         .from("driver_shifts")
         .select(`
           driver_id,
@@ -107,12 +110,13 @@ export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProp
             staff_id,
             car_number
           )
-        `) as { data: DriverShift[] | null }
+        `) as { data: DriverShift[] | null, error: any };
 
-      if (!driverShifts) throw new Error("Could not fetch driver shifts")
+      if (driverShiftsError) throw new Error(`Could not fetch driver shifts: ${driverShiftsError.message}`);
+      if (!driverShifts) throw new Error("No driver shifts data returned");
 
-      // Fetch schedules and replacements for the selected date
-      const { data: schedules } = await supabase
+      // Fetch schedules and replacements for the selected date with proper error handling
+      const { data: schedules, error: schedulesError } = await supabase
         .from("schedules")
         .select(`
           id,
@@ -130,190 +134,292 @@ export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProp
             )
           )
         `)
-        .eq("date", dateStr) as { data: Schedule[] | null }
+        .eq("date", dateStr) as { data: Schedule[] | null, error: any };
 
-      if (!schedules) throw new Error("Could not fetch schedules")
+      if (schedulesError) throw new Error(`Could not fetch schedules: ${schedulesError.message}`);
+      if (!schedules) throw new Error("No schedules data returned");
 
-      // Process data for each shift
-      const processedData = allShifts.map(shift => {
-        // Get all drivers assigned to this shift
-        const shiftDrivers = driverShifts
-          .filter(ds => ds.shift_id === shift.id)
-          .map(ds => {
-            const schedule = schedules?.find(s => s.driver_id === ds.driver_id)
-            const replacement = schedule?.replacements?.find(r => r.shift_id === shift.id)
-            
-            return {
-              number: 0, // Will be set later
-              carNumber: ds.drivers.car_number || "N/A",
-              driverName: schedule?.is_day_off || schedule?.is_annual_leave
-                ? `${ds.drivers.name} (Replaced by ${replacement?.drivers?.name || 'Not assigned'})`
-                : ds.drivers.name,
-              isReplaced: schedule?.is_day_off || schedule?.is_annual_leave,
-              replacementDriver: replacement?.drivers,
-            }
-          })
-          .filter(driver => driver.driverName) // Filter out any undefined drivers
-          .sort((a, b) => (a.carNumber === "N/A" ? 1 : b.carNumber === "N/A" ? -1 : a.carNumber.localeCompare(b.carNumber)))
-          // Add row numbers
-          .map((driver, index) => ({
-            ...driver,
-            number: index + 1
-          }))
+      // Process data for each shift with better error handling
+      const processedData: ProcessedShift[] = allShifts.map(shift => {
+        try {
+          // Get all drivers assigned to this shift
+          const shiftDrivers = driverShifts
+            .filter(ds => ds.shift_id === shift.id)
+            .map(ds => {
+              try {
+                const schedule = schedules?.find(s => s.driver_id === ds.driver_id);
+                const replacement = schedule?.replacements?.find(r => r.shift_id === shift.id);
+                
+                return {
+                  number: 0, // Will be set later
+                  carNumber: ds.drivers.car_number || "N/A",
+                  driverName: schedule?.is_day_off || schedule?.is_annual_leave
+                    ? `${ds.drivers.name} (Replaced by ${replacement?.drivers?.name || 'Not assigned'})`
+                    : ds.drivers.name,
+                  isReplaced: schedule?.is_day_off || schedule?.is_annual_leave,
+                  replacementDriver: replacement?.drivers,
+                  dayOff: schedule?.is_day_off ? "Day Off" : schedule?.is_annual_leave ? "Annual Leave" : "",
+                  contact: ds.drivers.staff_id,
+                } as ProcessedDriver;
+              } catch (error) {
+                console.error("Error processing driver:", error);
+                return null;
+              }
+            })
+            .filter((driver): driver is ProcessedDriver => driver !== null)
+            .filter(driver => driver.driverName)
+            .sort((a, b) => (a.carNumber === "N/A" ? 1 : b.carNumber === "N/A" ? -1 : a.carNumber.localeCompare(b.carNumber)))
+            .map((driver, index) => ({
+              ...driver,
+              number: index + 1
+            }));
 
-        return {
-          shiftName: shift.name,
-          shiftTime: `(${shift.start_time.substring(0, 5)}-${shift.end_time.substring(0, 5)})`,
-          drivers: shiftDrivers
+          return {
+            shiftName: shift.name,
+            shiftTime: `(${shift.start_time.substring(0, 5)}-${shift.end_time.substring(0, 5)})`,
+            drivers: shiftDrivers
+          };
+        } catch (error) {
+          console.error("Error processing shift:", error);
+          return {
+            shiftName: shift.name,
+            shiftTime: `(${shift.start_time.substring(0, 5)}-${shift.end_time.substring(0, 5)})`,
+            drivers: []
+          };
         }
-      }) as ProcessedShift[]
+      });
 
-      setScheduleData(processedData)
+      setScheduleData(processedData);
     } catch (error) {
-      console.error("Error fetching schedule:", error)
+      console.error("Error fetching schedule:", error);
       toast({
-        title: "Error",
-        description: "There was a problem fetching the schedule data.",
+        title: "Error fetching schedules",
+        description: error instanceof Error ? error.message : "An unexpected error occurred",
         variant: "destructive",
-      })
+      });
+      setScheduleData(null);
     } finally {
-      setIsLoading(false)
+      setIsLoading(false);
     }
-  }
+  };
 
   const exportToExcel = () => {
-    if (!scheduleData || !date) return
+    if (!scheduleData || !date) return;
 
     try {
-      // Create workbook with a single sheet
-      const wb = XLSX.utils.book_new()
-      
-      // Prepare data for a single sheet with all shifts
-      let rowData: any[] = []
-      let currentRow = 0
-      let shiftStartRows: number[] = [] // Track the starting row of each shift
+      const wb = XLSX.utils.book_new();
+      let rowData: any[] = [];
+      let currentRow = 0;
 
-      scheduleData.forEach((shiftData, index) => {
-        // Store the start row for this shift
-        shiftStartRows.push(currentRow)
-        
-        // Add date and shift header
-        rowData[currentRow] = [`${formatDate(date)} ${shiftData.shiftName} ${shiftData.shiftTime}`]
-        currentRow++
+      // Title Row
+      rowData[currentRow] = ["DRIVER'S DAILY SCHEDULE"];
+      currentRow++;
 
-        // Add column headers
-        rowData[currentRow] = ["No", "Car Number", "Driver Name"]
-        currentRow++
+      // Date Row
+      rowData[currentRow] = [`Date: ${formatDate(date)}`];
+      currentRow++;
+      currentRow++; // Empty row for spacing
 
-        // Add driver data
-        shiftData.drivers.forEach(driver => {
-          rowData[currentRow] = [driver.number, driver.carNumber, driver.driverName]
-          currentRow++
-        })
-
-        // Add empty row between shifts (except for the last shift)
-        if (index < scheduleData.length - 1) {
-          rowData[currentRow] = []
-          currentRow++
+      // Process each shift type
+      const shiftTypes = [
+        { 
+          title: "Morning Shift (07:00-16:00)", 
+          startTime: "07:00",
+          endTime: "16:00"
+        },
+        { 
+          title: "Afternoon Shift (16:00-00:00)",
+          startTime: "16:00",
+          endTime: "00:00"
+        },
+        { 
+          title: "Night shift",
+          startTime: "00:00",
+          endTime: "07:00"
+        },
+        { 
+          title: "PMO (8:30-18:00)",
+          startTime: "08:30",
+          endTime: "18:00"
         }
-      })
+      ];
 
-      // Create worksheet
-      const ws = XLSX.utils.aoa_to_sheet(rowData)
+      shiftTypes.forEach((shiftType, shiftIndex) => {
+        // Shift Header
+        rowData[currentRow] = [shiftType.title];
+        const shiftHeaderRow = currentRow;
+        currentRow++;
+
+        // Column Headers
+        rowData[currentRow] = [
+          "No.",
+          "Day off",
+          "Car Number",
+          "Driver Name",
+          "AL&OFF",
+          "Driver Replace By (ជំនួស)",
+          "Remark",
+          "Contact"
+        ];
+        const columnHeaderRow = currentRow;
+        currentRow++;
+
+        // Filter and add driver data for this shift
+        const shiftDrivers = scheduleData
+          .filter(shift => 
+            shift.shiftTime === `(${shiftType.startTime}-${shiftType.endTime})`)
+          .flatMap(shift => shift.drivers)
+          .map((driver, index) => [
+            index + 1,
+            driver.dayOff || "",
+            driver.carNumber,
+            driver.driverName,
+            driver.isReplaced ? "OFF" : "",
+            driver.replacementDriver?.name || "",
+            driver.isReplaced ? `OT(${shiftType.startTime}-${shiftType.endTime})` : "",
+            driver.contact || ""
+          ]);
+
+        shiftDrivers.forEach(driverRow => {
+          rowData[currentRow] = driverRow;
+          currentRow++;
+        });
+
+        currentRow++; // Empty row between shifts
+      });
+
+      const ws = XLSX.utils.aoa_to_sheet(rowData);
 
       // Set column widths
-      const columnWidths = [
-        { wch: 5 },  // No column
-        { wch: 12 }, // Car Number column
-        { wch: 40 }, // Driver Name column
-      ]
-      ws['!cols'] = columnWidths
+      ws['!cols'] = [
+        { wch: 5 },   // No.
+        { wch: 10 },  // Day off
+        { wch: 12 },  // Car Number
+        { wch: 20 },  // Driver Name
+        { wch: 8 },   // AL&OFF
+        { wch: 25 },  // Driver Replace By
+        { wch: 15 },  // Remark
+        { wch: 15 }   // Contact
+      ];
 
       // Apply styles
-      // Style for date headers
-      shiftStartRows.forEach((startRow, i) => {
-        const headerCell = XLSX.utils.encode_cell({ r: startRow, c: 0 })
-        if (!ws[headerCell]) {
-          ws[headerCell] = { v: rowData[startRow][0] }
-        }
-        ws[headerCell].s = {
-          font: { bold: true, color: { rgb: "000000" }, sz: 12 },
-          fill: { fgColor: { rgb: "CCCCCC" } },
-          alignment: { horizontal: "left" },
-          border: {
-            top: { style: "thin" },
-            bottom: { style: "thin" },
-            left: { style: "thin" },
-            right: { style: "thin" }
+      for (let i = 0; i < rowData.length; i++) {
+        const row = rowData[i];
+        if (!row || row.length === 0) continue;
+
+        const firstCellValue = String(row[0] || '');
+
+        // Title styling
+        if (i === 0) {
+          const cell = XLSX.utils.encode_cell({ r: i, c: 0 });
+          if (ws[cell]) {
+            ws[cell].s = {
+              font: { bold: true, sz: 16 },
+              fill: { fgColor: { rgb: "FFFF00" } }, // Yellow background
+              alignment: { horizontal: "center" }
+            };
           }
         }
 
-        // Style for column headers (row after the date header)
-        const columnHeaderRow = startRow + 1
-        for (let j = 0; j < 3; j++) {
-          const cell = XLSX.utils.encode_cell({ r: columnHeaderRow, c: j })
-          if (!ws[cell]) {
-            ws[cell] = { v: rowData[columnHeaderRow][j] }
-          }
-          ws[cell].s = {
-            font: { bold: true, color: { rgb: "000000" } },
-            fill: { fgColor: { rgb: "E6E6E6" } },
-            alignment: { horizontal: "center" },
-            border: {
-              top: { style: "thin" },
-              bottom: { style: "thin" },
-              left: { style: "thin" },
-              right: { style: "thin" }
-            }
+        // Shift header styling
+        if (firstCellValue.includes("Shift") || firstCellValue.includes("PMO")) {
+          const cell = XLSX.utils.encode_cell({ r: i, c: 0 });
+          if (ws[cell]) {
+            ws[cell].s = {
+              font: { bold: true, color: { rgb: "FF0000" } }, // Red text
+              fill: { fgColor: { rgb: "FFFF00" } }, // Yellow background
+              alignment: { horizontal: "center" }
+            };
           }
         }
 
-        // Style for data cells
-        const dataStartRow = columnHeaderRow + 1
-        const dataEndRow = dataStartRow + scheduleData[i].drivers.length - 1
-        for (let row = dataStartRow; row <= dataEndRow; row++) {
-          for (let col = 0; col < 3; col++) {
-            const cell = XLSX.utils.encode_cell({ r: row, c: col })
+        // Column header styling
+        if (firstCellValue === "No.") {
+          for (let j = 0; j < 8; j++) {
+            const cell = XLSX.utils.encode_cell({ r: i, c: j });
             if (ws[cell]) {
               ws[cell].s = {
+                font: { bold: true },
+                fill: { fgColor: { rgb: "FFFF00" } }, // Yellow background
+                alignment: { horizontal: "center" },
                 border: {
                   top: { style: "thin" },
                   bottom: { style: "thin" },
                   left: { style: "thin" },
                   right: { style: "thin" }
-                },
-                alignment: { 
-                  horizontal: col === 0 ? "center" : "left",
-                  vertical: "center"
                 }
-              }
+              };
             }
           }
         }
-      })
+
+        // Data row styling
+        if (typeof row[0] === 'number') {
+          for (let j = 0; j < 8; j++) {
+            const cell = XLSX.utils.encode_cell({ r: i, c: j });
+            if (!ws[cell]) continue;
+
+            // Base style for all cells
+            const style: any = {
+              border: {
+                top: { style: "thin" },
+                bottom: { style: "thin" },
+                left: { style: "thin" },
+                right: { style: "thin" }
+              },
+              alignment: { 
+                horizontal: j === 0 ? "center" : "left",
+                vertical: "center"
+              }
+            };
+
+            // Special styling for day-off column
+            const dayOffValue = String(row[1] || '').toLowerCase();
+            if (j === 1 && dayOffValue) {
+              if (dayOffValue.includes('sun')) {
+                style.fill = { fgColor: { rgb: "FF0000" } }; // Red background
+              } else if (dayOffValue.includes('sat')) {
+                style.fill = { fgColor: { rgb: "FFEB9C" } }; // Light yellow background
+              }
+            }
+
+            // Special styling for AL&OFF column
+            if (j === 4 && row[j] === 'OFF') {
+              style.font = { color: { rgb: "FF0000" } }; // Red text
+            }
+
+            // Special styling for replacement driver column
+            if (j === 5 && row[j]) {
+              style.fill = { fgColor: { rgb: "FFA500" } }; // Orange background
+            }
+
+            ws[cell].s = style;
+          }
+        }
+      }
 
       // Add the worksheet to workbook
-      XLSX.utils.book_append_sheet(wb, ws, "Daily Schedule")
+      XLSX.utils.book_append_sheet(wb, ws, "Daily Schedule");
 
-      // Generate filename
-      const fileName = `daily_schedule_${date.toISOString().split("T")[0]}.xlsx`
+      // Generate filename with date
+      const fileName = `driver_daily_schedule_${date.toISOString().split("T")[0]}.xlsx`;
 
       // Export to file
-      XLSX.writeFile(wb, fileName)
+      XLSX.writeFile(wb, fileName);
 
       toast({
         title: "Export successful",
         description: `Schedule exported to ${fileName}`,
-      })
+      });
     } catch (error) {
-      console.error("Error exporting to Excel:", error)
+      console.error("Error exporting to Excel:", error);
       toast({
         title: "Export failed",
         description: "There was a problem exporting the data to Excel.",
         variant: "destructive",
-      })
+      });
     }
-  }
+  };
 
   useEffect(() => {
     if (date) {

@@ -13,11 +13,21 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { AlertCircle } from "lucide-react"
+import { Input } from "@/components/ui/input"
+import { Search, Filter } from "lucide-react"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuCheckboxItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { cn } from "@/lib/utils"
 
 interface Driver {
   id: string
   name: string
   staff_id: string
+  car_number?: string
 }
 
 interface Shift {
@@ -57,6 +67,8 @@ interface DayScheduleDialogProps {
 export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts = [], onClose }: DayScheduleDialogProps) {
   const [isOpen, setIsOpen] = useState(true)
   const [loading, setLoading] = useState(false)
+  const [searchQuery, setSearchQuery] = useState("")
+  const [statusFilter, setStatusFilter] = useState<string[]>([])
   const [selectedShift, setSelectedShift] = useState<string | null>(null)
   const { toast } = useToast()
   const router = useRouter()
@@ -330,6 +342,48 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
     fetchShiftsForDrivers()
   }, [schedules])
 
+  // Filter drivers based on search query and status
+  const filteredDrivers = drivers.filter(driver => {
+    const matchesSearch = 
+      driver.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      driver.staff_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      driver.car_number?.toLowerCase().includes(searchQuery.toLowerCase())
+
+    if (!matchesSearch) return false
+
+    if (statusFilter.length === 0) return true
+
+    const schedule = getDriverSchedule(driver.id)
+    return statusFilter.some(filter => {
+      switch (filter) {
+        case "available":
+          return !schedule?.is_day_off && !schedule?.is_annual_leave
+        case "dayOff":
+          return schedule?.is_day_off
+        case "annual":
+          return schedule?.is_annual_leave
+        default:
+          return true
+      }
+    })
+  })
+
+  // Group drivers by status for better organization
+  const groupedDrivers = {
+    onDuty: filteredDrivers.filter(d => {
+      const schedule = getDriverSchedule(d.id)
+      return !schedule?.is_day_off && !schedule?.is_annual_leave
+    }),
+    dayOff: filteredDrivers.filter(d => {
+      const schedule = getDriverSchedule(d.id)
+      return schedule?.is_day_off
+    }),
+    annual: filteredDrivers.filter(d => {
+      const schedule = getDriverSchedule(d.id)
+      return schedule?.is_annual_leave
+    })
+  }
+
   return (
     <Dialog open={isOpen} onOpenChange={setIsOpen}>
       <DialogContent className="max-w-3xl">
@@ -469,42 +523,122 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
 
           <TabsContent value="drivers">
             <Card>
-              <CardHeader>
+              <CardHeader className="pb-3">
                 <CardTitle>Manage Drivers</CardTitle>
                 <CardDescription>Set day off or annual leave for drivers</CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
-                {drivers.map((driver) => {
-                  const schedule = getDriverSchedule(driver.id)
-                  return (
-                    <div key={driver.id} className="flex items-center justify-between space-x-4 rounded-lg border p-4">
-                      <div>
-                        <h4 className="font-medium">{driver.name}</h4>
-                        <p className="text-sm text-muted-foreground">{driver.staff_id}</p>
+              <CardContent>
+                <div className="space-y-6">
+                  <div className="space-y-4">
+                    <Select
+                      onValueChange={(value) => setSearchQuery(value)}
+                      value={searchQuery}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue placeholder="Select a driver" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {drivers.map((driver) => (
+                          <SelectItem key={driver.id} value={driver.id}>
+                            {driver.name} ({driver.staff_id}) {driver.car_number ? `- Car: ${driver.car_number}` : ''}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+
+                    {searchQuery && (
+                      <div className="rounded-lg border p-4">
+                        {(() => {
+                          const driver = drivers.find(d => d.id === searchQuery);
+                          const schedule = getDriverSchedule(searchQuery);
+                          
+                          if (!driver) return null;
+                          
+                          return (
+                            <div className="space-y-4">
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <h4 className="font-medium">{driver.name}</h4>
+                                  <p className="text-sm text-muted-foreground">
+                                    {driver.staff_id}
+                                    {driver.car_number && ` - Car: ${driver.car_number}`}
+                                  </p>
+                                </div>
+                                {(schedule?.is_day_off || schedule?.is_annual_leave) && (
+                                  <div className={cn(
+                                    "text-sm font-medium rounded-full px-3 py-1",
+                                    schedule.is_day_off 
+                                      ? "bg-blue-100 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300"
+                                      : "bg-green-100 text-green-700 dark:bg-green-900/20 dark:text-green-300"
+                                  )}>
+                                    {schedule.is_day_off ? "Day Off" : "Annual Leave"}
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="flex gap-4">
+                                <Button
+                                  variant={schedule?.is_day_off ? "default" : "outline"}
+                                  onClick={() => handleScheduleUpdate(driver.id, "day_off")}
+                                  disabled={loading || schedule?.is_annual_leave}
+                                  className={cn(
+                                    "flex-1",
+                                    schedule?.is_day_off && "bg-blue-600 hover:bg-blue-700"
+                                  )}
+                                >
+                                  {schedule?.is_day_off ? "Remove Day Off" : "Mark as Day Off"}
+                                </Button>
+                                <Button
+                                  variant={schedule?.is_annual_leave ? "default" : "outline"}
+                                  onClick={() => handleScheduleUpdate(driver.id, "annual_leave")}
+                                  disabled={loading || schedule?.is_day_off}
+                                  className={cn(
+                                    "flex-1",
+                                    schedule?.is_annual_leave && "bg-green-600 hover:bg-green-700"
+                                  )}
+                                >
+                                  {schedule?.is_annual_leave ? "Remove Annual Leave" : "Mark as Annual Leave"}
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
-                      <div className="flex items-center space-x-4">
-                        <div className="flex items-center space-x-2">
-                          <Switch
-                            id={`day-off-${driver.id}`}
-                            checked={schedule?.is_day_off || false}
-                            onCheckedChange={() => handleScheduleUpdate(driver.id, "day_off")}
-                            disabled={loading || schedule?.is_annual_leave}
-                          />
-                          <Label htmlFor={`day-off-${driver.id}`}>Day Off</Label>
+                    )}
+                  </div>
+
+                  <div className="space-y-4">
+                    <h3 className="text-sm font-medium">Drivers Off Today</h3>
+                    {['dayOff', 'annual'].map((group) => {
+                      const groupDrivers = group === 'dayOff' ? groupedDrivers.dayOff : groupedDrivers.annual;
+                      return groupDrivers.length > 0 && (
+                        <div key={group} className="rounded-lg border p-4">
+                          <h4 className={cn(
+                            "text-sm font-medium mb-2",
+                            group === 'dayOff' ? "text-blue-600" : "text-green-600"
+                          )}>
+                            {group === 'dayOff' ? 'Day Off' : 'Annual Leave'} ({groupDrivers.length})
+                          </h4>
+                          <div className="space-y-2">
+                            {groupDrivers.map((driver) => (
+                              <div key={driver.id} className="flex items-center justify-between text-sm p-2 bg-muted/50 rounded-md">
+                                <span>{driver.name} ({driver.staff_id})</span>
+                                {driver.car_number && (
+                                  <span className="text-muted-foreground">Car: {driver.car_number}</span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
                         </div>
-                        <div className="flex items-center space-x-2">
-                          <Switch
-                            id={`annual-leave-${driver.id}`}
-                            checked={schedule?.is_annual_leave || false}
-                            onCheckedChange={() => handleScheduleUpdate(driver.id, "annual_leave")}
-                            disabled={loading || schedule?.is_day_off}
-                          />
-                          <Label htmlFor={`annual-leave-${driver.id}`}>Annual Leave</Label>
-                        </div>
+                      );
+                    })}
+                    {groupedDrivers.dayOff.length === 0 && groupedDrivers.annual.length === 0 && (
+                      <div className="text-center py-4 text-muted-foreground border rounded-lg">
+                        No drivers are off today
                       </div>
-                    </div>
-                  )
-                })}
+                    )}
+                  </div>
+                </div>
               </CardContent>
             </Card>
           </TabsContent>
