@@ -401,122 +401,115 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
             <Card>
               <CardHeader>
                 <CardTitle>Day Schedule</CardTitle>
-                <CardDescription>View and manage schedules for this day</CardDescription>
+                <CardDescription>Manage driver replacements</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                {schedules.map((schedule) => {
-                  const driver = drivers.find(d => d.id === schedule.driver_id)
-                  if (!driver) return null
+                <Select
+                  onValueChange={(value) => setSelectedShift(value)}
+                  value={selectedShift || ""}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select a driver to replace" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {schedules
+                      .filter(schedule => schedule.is_day_off || schedule.is_annual_leave)
+                      .map((schedule) => {
+                        const driver = drivers.find(d => d.id === schedule.driver_id);
+                        if (!driver) return null;
+                        return (
+                          <SelectItem key={schedule.id} value={schedule.id}>
+                            {driver.name} ({driver.staff_id}) - {schedule.is_day_off ? "Day Off" : "Annual Leave"}
+                          </SelectItem>
+                        );
+                    })}
+                  </SelectContent>
+                </Select>
+
+                {selectedShift && (() => {
+                  const schedule = schedules.find(s => s.id === selectedShift);
+                  const driver = schedule ? drivers.find(d => d.id === schedule.driver_id) : null;
+                  
+                  if (!schedule || !driver) return null;
 
                   return (
-                    <div key={schedule.id} className="space-y-4">
-                      <div className="flex items-center justify-between space-x-4 rounded-lg border p-4">
+                    <div className="rounded-lg border p-4 space-y-4">
+                      <div className="flex items-center justify-between">
                         <div>
                           <h4 className="font-medium">{driver.name}</h4>
-                          <p className="text-sm text-muted-foreground">{driver.staff_id}</p>
+                          <p className="text-sm text-muted-foreground">
+                            {driver.staff_id}
+                            {driver.car_number && ` - Car: ${driver.car_number}`}
+                          </p>
                         </div>
-                        <div className="flex items-center space-x-4">
-                          {schedule.is_day_off && (
-                            <span className="text-sm rounded bg-blue-100 dark:bg-blue-900/20 px-2 py-1 text-blue-700 dark:text-blue-300">
-                              Day Off
-                            </span>
-                          )}
-                          {schedule.is_annual_leave && (
-                            <span className="text-sm rounded bg-green-100 dark:bg-green-900/20 px-2 py-1 text-green-700 dark:text-green-300">
-                              Annual Leave
-                            </span>
-                          )}
+                        <div className={cn(
+                          "text-sm font-medium rounded-full px-3 py-1",
+                          schedule.is_day_off 
+                            ? "bg-blue-100 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300"
+                            : "bg-green-100 text-green-700 dark:bg-green-900/20 dark:text-green-300"
+                        )}>
+                          {schedule.is_day_off ? "Day Off" : "Annual Leave"}
                         </div>
                       </div>
 
-                      {needsReplacement(schedule) && (
-                        <Alert variant="destructive">
-                          <AlertCircle className="h-4 w-4" />
-                          <AlertDescription>
-                            Replacement needed for {driver.name}. Please assign a replacement driver.
-                          </AlertDescription>
-                        </Alert>
-                      )}
+                      <div className="space-y-4">
+                        {shifts.filter(shift => 
+                          driverShifts.some(ds => ds.shift_id === shift.id)
+                        ).map(shift => {
+                          const replacement = schedule.replacements.find(r => r.shift_id === shift.id);
+                          const replacementDriver = replacement 
+                            ? drivers.find(d => d.id === replacement.replacement_driver_id)
+                            : null;
 
-                      {(schedule.is_day_off || schedule.is_annual_leave) && (
-                        <div className="rounded-lg border p-4">
-                          <h5 className="font-medium mb-2">Assign Replacements</h5>
-                          <div className="space-y-4">
-                            {shifts.filter(shift => 
-                              schedule.replacements.some(r => r.shift_id === shift.id) || // Show shifts that already have replacements
-                              driverShifts.some(ds => ds.shift_id === shift.id) // Show shifts assigned to the driver
-                            ).map(shift => {
-                              const replacement = schedule.replacements.find(r => r.shift_id === shift.id)
-                              return (
-                                <div key={shift.id} className="space-y-2">
-                                  <div className="flex items-center justify-between">
-                                    <Label className="font-medium">
-                                      {shift.name}
-                                      <span className="ml-2 font-normal text-sm text-muted-foreground">
-                                        ({shift.start_time.substring(0, 5)} - {shift.end_time.substring(0, 5)})
-                                      </span>
-                                    </Label>
-                                  </div>
-                                  <Select
-                                    onValueChange={(value) => {
-                                      if (value) {
-                                        if (replacement) {
-                                          handleUpdateReplacement(replacement.id, value, schedule.driver_id, schedule.id)
-                                        } else {
-                                          handleAssignReplacement(schedule.id, value, schedule.driver_id, shift.id)
-                                        }
-                                      }
-                                    }}
-                                    value={replacement?.replacement_driver_id || ""}
-                                    disabled={loading}
-                                  >
-                                    <SelectTrigger>
-                                      <SelectValue placeholder={`Select replacement driver for ${shift.name}`} />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      {getAvailableDrivers()
-                                        .filter(d => d.id !== driver.id)
-                                        .map(d => (
-                                          <SelectItem key={d.id} value={d.id}>
-                                            {d.name} ({d.staff_id})
-                                          </SelectItem>
-                                        ))
-                                      }
-                                    </SelectContent>
-                                  </Select>
-                                </div>
-                              )
-                            })}
-                          </div>
-                          {schedule.replacements.length > 0 && (
-                            <div className="mt-4 space-y-3">
-                              <h6 className="text-sm font-medium text-muted-foreground">Current Replacements:</h6>
-                              {schedule.replacements.map(replacement => {
-                                const replacementDriver = drivers.find(d => d.id === replacement.replacement_driver_id)
-                                const replacementShift = shifts.find(s => s.id === replacement.shift_id)
-                                return (
-                                  <div key={replacement.id} className="flex items-center justify-between p-2 rounded-md bg-muted/50">
-                                    <div>
-                                      <div className="font-medium">{replacementDriver?.name}</div>
-                                      <div className="text-sm text-muted-foreground">
-                                        {replacementDriver?.staff_id} - {replacementShift?.name}
-                                        {replacementShift?.start_time && replacementShift?.end_time && (
-                                          <span className="ml-1">
-                                            ({replacementShift.start_time.substring(0, 5)} - {replacementShift.end_time.substring(0, 5)})
-                                          </span>
-                                        )}
-                                      </div>
-                                    </div>
-                                  </div>
-                                )
-                              })}
+                          return (
+                            <div key={shift.id} className="rounded-lg border p-3 space-y-2">
+                              <div className="flex items-center justify-between">
+                                <Label className="font-medium">
+                                  {shift.name}
+                                  <span className="ml-2 font-normal text-sm text-muted-foreground">
+                                    ({shift.start_time.substring(0, 5)} - {shift.end_time.substring(0, 5)})
+                                  </span>
+                                </Label>
+                                {replacementDriver && (
+                                  <span className="text-sm text-muted-foreground">
+                                    Currently: {replacementDriver.name}
+                                  </span>
+                                )}
+                              </div>
+                              <Select
+                                onValueChange={(value) => {
+                                  if (value) {
+                                    if (replacement) {
+                                      handleUpdateReplacement(replacement.id, value, schedule.driver_id, schedule.id);
+                                    } else {
+                                      handleAssignReplacement(schedule.id, value, schedule.driver_id, shift.id);
+                                    }
+                                  }
+                                }}
+                                value={replacement?.replacement_driver_id || ""}
+                                disabled={loading}
+                              >
+                                <SelectTrigger>
+                                  <SelectValue placeholder="Select replacement driver" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {getAvailableDrivers()
+                                    .filter(d => d.id !== driver.id)
+                                    .map(d => (
+                                      <SelectItem key={d.id} value={d.id}>
+                                        {d.name} ({d.staff_id})
+                                      </SelectItem>
+                                    ))
+                                  }
+                                </SelectContent>
+                              </Select>
                             </div>
-                          )}
-                        </div>
-                      )}
+                          );
+                        })}
+                      </div>
                     </div>
-                  )
-                })}
+                  );
+                })()}
               </CardContent>
             </Card>
           </TabsContent>
