@@ -17,6 +17,7 @@ interface Driver {
   name: string
   staff_id: string
   car_number: string | null
+  contact_number: string | null
 }
 
 interface Shift {
@@ -58,6 +59,7 @@ interface ProcessedDriver {
   replacementDriver?: Driver
   dayOff?: string
   contact?: string
+  alOff?: string
 }
 
 interface ProcessedShift {
@@ -65,6 +67,16 @@ interface ProcessedShift {
   shiftTime: string
   drivers: ProcessedDriver[]
 }
+
+const DAYS_OF_WEEK = [
+  { value: 4, label: "Friday" },
+  { value: 5, label: "Saturday" },
+  { value: 6, label: "Sunday" },
+  { value: 0, label: "Monday" },
+  { value: 1, label: "Tuesday" },
+  { value: 2, label: "Wednesday" },
+  { value: 3, label: "Thursday" }
+]
 
 export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProps) {
   const [date, setDate] = useState<Date | undefined>(new Date())
@@ -87,6 +99,8 @@ export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProp
     setIsLoading(true);
     const supabase = getSupabaseClient();
     const dateStr = date.toISOString().split("T")[0];
+    const currentMonth = date.getMonth() + 1;
+    const currentYear = date.getFullYear();
 
     try {
       // First, fetch all shifts with proper error handling
@@ -98,24 +112,16 @@ export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProp
       if (shiftsError) throw new Error(`Could not fetch shifts: ${shiftsError.message}`);
       if (!allShifts) throw new Error("No shifts data returned");
 
-      // Then fetch driver assignments with proper error handling
-      const { data: driverShifts, error: driverShiftsError } = await supabase
-        .from("driver_shifts")
-        .select(`
-          driver_id,
-          shift_id,
-          drivers!inner (
-            id,
-            name,
-            staff_id,
-            car_number
-          )
-        `) as { data: DriverShift[] | null, error: any };
+      // Fetch day off patterns for all drivers
+      const { data: dayOffPatterns, error: dayOffError } = await supabase
+        .from("driver_monthly_dayoff")
+        .select("*")
+        .eq("month", currentMonth)
+        .eq("year", currentYear);
 
-      if (driverShiftsError) throw new Error(`Could not fetch driver shifts: ${driverShiftsError.message}`);
-      if (!driverShifts) throw new Error("No driver shifts data returned");
+      if (dayOffError) throw new Error(`Could not fetch day off patterns: ${dayOffError.message}`);
 
-      // Fetch schedules and replacements for the selected date with proper error handling
+      // Fetch schedules and replacements for the selected date
       const { data: schedules, error: schedulesError } = await supabase
         .from("schedules")
         .select(`
@@ -130,14 +136,32 @@ export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProp
               id,
               name,
               staff_id,
-              car_number
+              car_number,
+              contact_number
             )
           )
         `)
-        .eq("date", dateStr) as { data: Schedule[] | null, error: any };
+        .eq("date", dateStr);
 
       if (schedulesError) throw new Error(`Could not fetch schedules: ${schedulesError.message}`);
-      if (!schedules) throw new Error("No schedules data returned");
+
+      // Then fetch driver assignments with proper error handling
+      const { data: driverShifts, error: driverShiftsError } = await supabase
+        .from("driver_shifts")
+        .select(`
+          driver_id,
+          shift_id,
+          drivers!inner (
+            id,
+            name,
+            staff_id,
+            car_number,
+            contact_number
+          )
+        `) as { data: DriverShift[] | null, error: any };
+
+      if (driverShiftsError) throw new Error(`Could not fetch driver shifts: ${driverShiftsError.message}`);
+      if (!driverShifts) throw new Error("No driver shifts data returned");
 
       // Process data for each shift with better error handling
       const processedData: ProcessedShift[] = allShifts.map(shift => {
@@ -149,7 +173,11 @@ export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProp
               try {
                 const schedule = schedules?.find(s => s.driver_id === ds.driver_id);
                 const replacement = schedule?.replacements?.find(r => r.shift_id === shift.id);
-                
+                const dayOffPattern = dayOffPatterns?.find(p => p.driver_id === ds.driver_id);
+                const dayOffLabel = dayOffPattern 
+                  ? DAYS_OF_WEEK.find(d => d.value === dayOffPattern.day_of_week)?.label 
+                  : "";
+
                 return {
                   number: 0, // Will be set later
                   carNumber: ds.drivers.car_number || "N/A",
@@ -158,8 +186,9 @@ export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProp
                     : ds.drivers.name,
                   isReplaced: schedule?.is_day_off || schedule?.is_annual_leave,
                   replacementDriver: replacement?.drivers,
-                  dayOff: schedule?.is_day_off ? "Day Off" : schedule?.is_annual_leave ? "Annual Leave" : "",
-                  contact: ds.drivers.staff_id,
+                  dayOff: dayOffLabel || "",
+                  contact: ds.drivers.contact_number || "",
+                  alOff: schedule?.is_annual_leave ? "AL" : schedule?.is_day_off ? "OFF" : ""
                 } as ProcessedDriver;
               } catch (error) {
                 console.error("Error processing driver:", error);
@@ -168,7 +197,24 @@ export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProp
             })
             .filter((driver): driver is ProcessedDriver => driver !== null)
             .filter(driver => driver.driverName)
-            .sort((a, b) => (a.carNumber === "N/A" ? 1 : b.carNumber === "N/A" ? -1 : a.carNumber.localeCompare(b.carNumber)))
+            .sort((a, b) => {
+              // First sort by day off (Friday to Thursday)
+              const dayOrder = {
+                "Friday": 0,
+                "Saturday": 1,
+                "Sunday": 2,
+                "Monday": 3,
+                "Tuesday": 4,
+                "Wednesday": 5,
+                "Thursday": 6
+              };
+              const dayA = dayOrder[a.dayOff as keyof typeof dayOrder] ?? 999;
+              const dayB = dayOrder[b.dayOff as keyof typeof dayOrder] ?? 999;
+              if (dayA !== dayB) return dayA - dayB;
+              
+              // Then sort by car number if day off is the same
+              return (a.carNumber === "N/A" ? 1 : b.carNumber === "N/A" ? -1 : a.carNumber.localeCompare(b.carNumber));
+            })
             .map((driver, index) => ({
               ...driver,
               number: index + 1
@@ -274,7 +320,7 @@ export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProp
             driver.dayOff || "",
             driver.carNumber,
             driver.driverName,
-            driver.isReplaced ? "OFF" : "",
+            driver.alOff || "",
             driver.replacementDriver?.name || "",
             driver.isReplaced ? `OT(${shiftType.startTime}-${shiftType.endTime})` : "",
             driver.contact || ""
@@ -466,6 +512,12 @@ export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProp
                       <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
                         Driver Name
                       </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                        Contact
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                        Day Off
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
@@ -485,6 +537,12 @@ export function DailyScheduleReport({ drivers, shifts }: DailyScheduleReportProp
                           ) : (
                             driver.driverName
                           )}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-sm">
+                          {driver.contact}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-sm">
+                          {driver.dayOff}
                         </td>
                       </tr>
                     ))}
