@@ -72,7 +72,7 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
   const [selectedShift, setSelectedShift] = useState<string | null>(null)
   const { toast } = useToast()
   const router = useRouter()
-  const [driverShifts, setDriverShifts] = useState<Array<{ shift_id: string }>>([])
+  const [driverShifts, setDriverShifts] = useState<Record<string, Array<{ shift_id: string }>>>({})
 
   const handleClose = () => {
     setIsOpen(false)
@@ -160,8 +160,10 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
       .from("driver_shifts")
       .select("shift_id")
       .eq("driver_id", driverId)
-    
-    setDriverShifts(data || [])
+    setDriverShifts(prev => ({
+      ...prev,
+      [driverId]: data || []
+    }))
   }
 
   // Handle assigning replacement
@@ -327,18 +329,15 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
 
   // Add effect to fetch driver shifts
   useEffect(() => {
+    setDriverShifts({})
     const fetchShiftsForDrivers = async () => {
-      // Get all drivers that are on leave or day off
       const driversOnLeave = schedules
         .filter(s => s.is_day_off || s.is_annual_leave)
         .map(s => s.driver_id)
-
-      // Fetch shifts for each driver
       for (const driverId of driversOnLeave) {
         await fetchDriverShifts(driverId)
       }
     }
-
     fetchShiftsForDrivers()
   }, [schedules])
 
@@ -454,7 +453,7 @@ export function DayScheduleDialog({ date, drivers = [], schedules = [], shifts =
 
                       <div className="space-y-4">
                         {shifts.filter(shift => 
-                          driverShifts.some(ds => ds.shift_id === shift.id)
+                          driverShifts[driver.id]?.some((ds: { shift_id: string }) => ds.shift_id === shift.id)
                         ).map(shift => {
                           const replacement = schedule.replacements.find(r => r.shift_id === shift.id);
                           const replacementDriver = replacement 
